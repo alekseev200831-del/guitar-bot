@@ -30,20 +30,33 @@ STRAT_TELE_KEYWORDS = [
 async def start_handler(message: types.Message):
     await message.answer(
         "🎸 **Радар гитар Bazoš запущен!**\n\n"
-        "Я отслеживаю (глубина 10 страниц):\n"
-        "1. Любые гитары/басы от 600€ (или Vymením/Dohodou) с обменом\n"
-        "2. Телекастеры и Стратокастеры от 600€\n"
-        "3. Бюджетные бас-гитары до 150€\n\n"
-        "Напиши /test чтобы запустить глубокий поиск прямо сейчас.",
+        "Отслеживаю:\n"
+        "1. Обмен от 600€ (или Vymením/Dohodou)\n"
+        "2. Telecaster / Stratocaster от 600€\n"
+        "3. Басы до 150€\n\n"
+        "Напиши /test для проверки Bazoš.",
         parse_mode="Markdown"
     )
 
 @dp.message(Command("test"))
 async def test_handler(message: types.Message):
-    await message.answer("🔍 Проверяю первые 10 страниц Bazoš.sk (до 200 объявлений)... Это займет ~10 секунд.")
+    await message.answer("🔍 Запускаю полный анализ Bazoš.sk (со сканированием страниц объявлений)...")
     found = await check_bazos_guitars(force_send=True)
     if not found:
-        await message.answer("ℹ️ Подходящих объявлений не найдено.")
+        await message.answer("ℹ️ Подходящих объявлений по заданным критериям прямо сейчас нет. Мониторинг ищет новые лоты каждые 15 минут!")
+
+async def fetch_full_description(session, url):
+    """Заходит внутрь объявления и получает полный текст"""
+    try:
+        async with session.get(url, timeout=5) as resp:
+            if resp.status == 200:
+                html = await resp.text()
+                soup = BeautifulSoup(html, "html.parser")
+                desc_elem = soup.select_one(".popis")
+                return desc_elem.text.strip().lower() if desc_elem else ""
+    except Exception:
+        pass
+    return ""
 
 async def check_bazos_guitars(force_send=False):
     headers = {
@@ -51,9 +64,9 @@ async def check_bazos_guitars(force_send=False):
     }
     found_any = False
 
-    # Сканируем 10 страниц (0, 20, 40 ... 180) для гитар и басов
+    # Сканируем первые 5 страниц (100 объявлений)
     urls_to_check = []
-    for page in range(0, 200, 20):
+    for page in range(0, 100, 20):
         page_str = f"{page}/" if page > 0 else ""
         urls_to_check.append(("guitar", f"https://hudba.bazos.sk/gitary/{page_str}"))
         urls_to_check.append(("bass", f"https://hudba.bazos.sk/basgitaru/{page_str}"))
@@ -72,7 +85,7 @@ async def check_bazos_guitars(force_send=False):
                     for ad in ads:
                         title_elem = ad.select_one(".inzeratynadpis a")
                         price_elem = ad.select_one(".inzeratycena")
-                        desc_elem = ad.select_one(".popis")
+                        short_desc_elem = ad.select_one(".popis")
                         
                         if not title_elem or not price_elem:
                             continue
@@ -85,7 +98,7 @@ async def check_bazos_guitars(force_send=False):
                             
                         title = title_elem.text.strip()
                         title_lower = title.lower()
-                        desc = desc_elem.text.strip().lower() if desc_elem else ""
+                        short_desc = short_desc_elem.text.strip().lower() if short_desc_elem else ""
                         price_raw = price_elem.text.strip().lower()
 
                         digits = re.sub(r"[^\d]", "", price_raw)
@@ -93,8 +106,16 @@ async def check_bazos_guitars(force_send=False):
 
                         match_reason = None
 
-                        has_exchange = any(kw in desc or kw in title_lower or kw in price_raw for kw in EXCHANGE_KEYWORDS)
-                        has_strat_tele = any(kw in desc or kw in title_lower for kw in STRAT_TELE_KEYWORDS)
+                        # Быстрая проверка совпадений
+                        has_exchange_short = any(kw in short_desc or kw in title_lower or kw in price_raw for kw in EXCHANGE_KEYWORDS)
+                        has_strat_tele = any(kw in short_desc or kw in title_lower for kw in STRAT_TELE_KEYWORDS)
+
+                        # Если есть подозрение на обмен, но в кратком описании слова нет — заходим внутрь объявления
+                        full_desc = short_desc
+                        if not has_exchange_short and (price is None or price >= 600):
+                            full_desc = await fetch_full_description(session, ad_url)
+
+                        has_exchange = has_exchange_short or any(kw in full_desc for kw in EXCHANGE_KEYWORDS)
 
                         # 1. Обмен (цена >= 600€ или Vymením/Dohodou)
                         if has_exchange and (price is None or price >= 600):
@@ -119,9 +140,7 @@ async def check_bazos_guitars(force_send=False):
                                 f"🔗 [Открыть на Bazoš]({ad_url})"
                             )
                             await bot.send_message(chat_id=MY_CHAT_ID, text=text, parse_mode="Markdown")
-                
-                # Небольшая пауза 0.5 сек между запросами страниц
-                await asyncio.sleep(0.5)
+                            await asyncio.sleep(0.3)
             except Exception as e:
                 print(f"Ошибка при парсинге: {e}")
     return found_any
