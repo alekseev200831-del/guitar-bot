@@ -27,8 +27,15 @@ STRAT_TELE_KEYWORDS = [
 ]
 
 BASS_KEYWORDS = [
-    "basgitar", "basa", "bass", "бас"
+    "basgitar", "basa", "bass"
 ]
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "sk-SK,sk;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://hudba.bazos.sk/"
+}
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
@@ -44,14 +51,17 @@ async def start_handler(message: types.Message):
 
 @dp.message(Command("test"))
 async def test_handler(message: types.Message):
-    await message.answer("🔍 Запускаю детальную проверку Bazoš.sk...")
-    found = await check_bazos_guitars(force_send=True)
-    if not found:
-        await message.answer("ℹ️ Подходящих объявлений не найдено.")
+    await message.answer("🔍 Проверяю подключение к Bazoš.sk...")
+    count, error_msg = await check_bazos_guitars(force_send=True)
+    
+    if error_msg:
+        await message.answer(f"⚠️ Ошибка подключения к Bazoš: {error_msg}")
+    elif count == 0:
+        await message.answer("ℹ️ Доступ к Bazoš есть, но объявлений по фильтрам не найдено.")
 
 async def fetch_full_description(session, url):
     try:
-        async with session.get(url, timeout=5) as resp:
+        async with session.get(url, headers=HEADERS, timeout=5) as resp:
             if resp.status == 200:
                 html = await resp.text()
                 soup = BeautifulSoup(html, "html.parser")
@@ -62,29 +72,34 @@ async def fetch_full_description(session, url):
     return ""
 
 async def check_bazos_guitars(force_send=False):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    found_any = False
+    found_count = 0
+    error_log = None
 
-    # Сканируем первые 5 страниц в категориях гитар и басов
-    urls = []
-    for page in range(0, 100, 20):
-        p = f"{page}/" if page > 0 else ""
-        urls.append(f"https://hudba.bazos.sk/gitary/{p}")
-        urls.append(f"https://hudba.bazos.sk/basgitaru/{p}")
+    urls = [
+        "https://hudba.bazos.sk/gitary/",
+        "https://hudba.bazos.sk/basgitaru/",
+        "https://hudba.bazos.sk/gitary/20/",
+        "https://hudba.bazos.sk/basgitaru/20/",
+        "https://hudba.bazos.sk/gitary/40/",
+        "https://hudba.bazos.sk/basgitaru/40/"
+    ]
 
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession() as session:
         for url in urls:
             try:
-                async with session.get(url) as response:
+                async with session.get(url, headers=HEADERS, timeout=10) as response:
                     if response.status != 200:
+                        error_log = f"Bazoš вернул статус HTTP {response.status}"
                         continue
                     
                     html = await response.text()
                     soup = BeautifulSoup(html, "html.parser")
                     ads = soup.select(".inzeraty")
                     
+                    if not ads:
+                        error_log = "Не удалось распарсить блоки объявлений (.inzeraty)"
+                        continue
+
                     for ad in ads:
                         title_elem = ad.select_one(".inzeratynadpis a")
                         price_elem = ad.select_one(".inzeratycena")
@@ -104,39 +119,29 @@ async def check_bazos_guitars(force_send=False):
                         short_desc = short_desc_elem.text.strip().lower() if short_desc_elem else ""
                         price_raw = price_elem.text.strip().lower()
 
-                        # Надёжный парсинг цены
                         digits = re.findall(r'\d+', price_raw)
                         price = float("".join(digits)) if digits else None
 
-                        # Флаги совпадений
                         is_bass = "basgitaru" in ad_url or any(kw in title_lower or kw in short_desc for kw in BASS_KEYWORDS)
                         has_strat_tele = any(kw in title_lower or kw in short_desc for kw in STRAT_TELE_KEYWORDS)
-                        
-                        # Проверяем обмен
                         has_exchange = any(kw in short_desc or kw in title_lower or kw in price_raw for kw in EXCHANGE_KEYWORDS)
                         
-                        # Если гитара дорогая или цена не указана, но похожа на обмен — заглядываем внутрь
                         if not has_exchange and (price is None or price >= 600):
                             full_desc = await fetch_full_description(session, ad_url)
                             has_exchange = any(kw in full_desc for kw in EXCHANGE_KEYWORDS)
 
                         match_reason = None
 
-                        # Критерий 1: Обмен (цена >= 600€ или Vymením/Dohodou)
                         if has_exchange and (price is None or price >= 600):
                             match_reason = "🔄 Вариант для обмена"
-
-                        # Критерий 2: Strat или Telecaster от 600€
                         elif has_strat_tele and price is not None and price >= 600:
                             match_reason = "🎸 Telecaster / Stratocaster (от 600€)"
-
-                        # Критерий 3: Любой бас до 150€
                         elif is_bass and price is not None and 0 < price <= 150:
                             match_reason = "🔥 Бюджетный бас (до 150€)"
 
                         if match_reason:
                             seen_ads.add(ad_id)
-                            found_any = True
+                            found_count += 1
                             price_display = f"{int(price)} €" if price else "Vymením / Dohodou"
                             text = (
                                 f"🎯 **{match_reason}**\n\n"
@@ -147,8 +152,9 @@ async def check_bazos_guitars(force_send=False):
                             await bot.send_message(chat_id=MY_CHAT_ID, text=text, parse_mode="Markdown")
                             await asyncio.sleep(0.2)
             except Exception as e:
-                print(f"Ошибка парсинга: {e}")
-    return found_any
+                error_log = str(e)
+
+    return found_count, error_log
 
 async def start_web_server():
     from aiohttp import web
