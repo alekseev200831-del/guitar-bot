@@ -2,21 +2,20 @@ import asyncio
 import re
 import aiohttp
 from bs4 import BeautifulSoup
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = "8976928394:AAHcq8RzfMte_PFREl2nHGA2Wij2JeeBRSc"
-MY_CHAT_ID = 800295680  # ВСТАВЬ СВОЙ ЦИФРОВОЙ ID ИЗ USERINFOBOT
+MY_CHAT_ID = 800295680  # ВСТАВЬ СВОЙ ЦИФРОВОЙ ID
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
-# Память для уже проверенных объявлений
 seen_ads = set()
 
-# Ключевые слова для обмена на Bazoš
 EXCHANGE_KEYWORDS = [
     "výmena", "vymením", "vymena", "vymenim", 
     "na výmenu", "na vymenu", "možná výmena", "mozna vymena"
@@ -27,10 +26,24 @@ URLS = [
     "https://hudba.bazos.sk/basgitaru/"
 ]
 
-async def check_bazos_guitars():
+# Ответ на команду /start
+@dp.message(Command("start"))
+async def start_handler(message: types.Message):
+    await message.answer("🎸 **Радар гитар Bazoš запущен!**\n\nЯ ищу гитары и басы от 600€ до 850€ с возможностью обмена. Как только что-то появится, я сразу пришлю ссылку.\n\nНапиши /test чтобы запустить поиск прямо сейчас.", parse_mode="Markdown")
+
+# Команда для ручной проверки /test
+@dp.message(Command("test"))
+async def test_handler(message: types.Message):
+    await message.answer("🔍 Проверяю Bazoš.sk...")
+    found = await check_bazos_guitars(force_send=True)
+    if not found:
+        await message.answer("ℹ️ В диапазоне 600€–850€ объявлений с текстом обмена прямо сейчас не найдено. Фоновый мониторинг продолжит искать каждые 15 минут!")
+
+async def check_bazos_guitars(force_send=False):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
+    found_any = False
 
     async with aiohttp.ClientSession(headers=headers) as session:
         for base_url in URLS:
@@ -54,7 +67,7 @@ async def check_bazos_guitars():
                         ad_url = "https://hudba.bazos.sk" + title_elem["href"]
                         ad_id = ad_url.split('/')[4] if len(ad_url.split('/')) > 4 else ad_url
                         
-                        if ad_id in seen_ads:
+                        if not force_send and ad_id in seen_ads:
                             continue
                             
                         title = title_elem.text.strip()
@@ -66,14 +79,13 @@ async def check_bazos_guitars():
                         except ValueError:
                             continue
 
-                        # Ищем гитары и басы от 600€ до 850€
                         if 600 <= price <= 850:
                             has_exchange = any(kw in desc or kw in title.lower() for kw in EXCHANGE_KEYWORDS)
                             
-                            # Запоминаем объявление
                             seen_ads.add(ad_id)
                             
                             if has_exchange:
+                                found_any = True
                                 text = (
                                     f"🎸 **НАЙДЕН ВАРИАНТ ДЛЯ ОБМЕНА!**\n\n"
                                     f"📌 **Инструмент:** {title}\n"
@@ -83,8 +95,8 @@ async def check_bazos_guitars():
                                 await bot.send_message(chat_id=MY_CHAT_ID, text=text, parse_mode="Markdown")
             except Exception as e:
                 print(f"Ошибка при парсинге Bazoš: {e}")
+    return found_any
 
-# Минимальный веб-сервер для Render Health Check
 async def start_web_server():
     from aiohttp import web
     app = web.Application()
@@ -95,14 +107,9 @@ async def start_web_server():
     await site.start()
 
 async def main():
-    # Проверка Bazoš каждые 15 минут
     scheduler.add_job(check_bazos_guitars, 'interval', minutes=15)
     scheduler.start()
     
-    # Запуск первой проверки сразу при старте
-    asyncio.create_task(check_bazos_guitars())
-    
-    print("🎸 Гитарный бот запущен!")
     await start_web_server()
     await dp.start_polling(bot)
 
