@@ -26,27 +26,30 @@ STRAT_TELE_KEYWORDS = [
     "telecaster", "stratocaster", "tele", "strat"
 ]
 
+BASS_KEYWORDS = [
+    "basgitar", "basa", "bass", "бас"
+]
+
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     await message.answer(
         "🎸 **Радар гитар Bazoš запущен!**\n\n"
         "Отслеживаю:\n"
-        "1. Обмен от 600€ (или Vymením/Dohodou)\n"
+        "1. Любой обмен (от 600€ или Vymením/Dohodou)\n"
         "2. Telecaster / Stratocaster от 600€\n"
-        "3. Басы до 150€\n\n"
-        "Напиши /test для проверки Bazoš.",
+        "3. Любые бас-гитары до 150€\n\n"
+        "Напиши /test для проверки.",
         parse_mode="Markdown"
     )
 
 @dp.message(Command("test"))
 async def test_handler(message: types.Message):
-    await message.answer("🔍 Запускаю полный анализ Bazoš.sk (со сканированием страниц объявлений)...")
+    await message.answer("🔍 Запускаю детальную проверку Bazoš.sk...")
     found = await check_bazos_guitars(force_send=True)
     if not found:
-        await message.answer("ℹ️ Подходящих объявлений по заданным критериям прямо сейчас нет. Мониторинг ищет новые лоты каждые 15 минут!")
+        await message.answer("ℹ️ Подходящих объявлений не найдено.")
 
 async def fetch_full_description(session, url):
-    """Заходит внутрь объявления и получает полный текст"""
     try:
         async with session.get(url, timeout=5) as resp:
             if resp.status == 200:
@@ -64,15 +67,15 @@ async def check_bazos_guitars(force_send=False):
     }
     found_any = False
 
-    # Сканируем первые 5 страниц (100 объявлений)
-    urls_to_check = []
+    # Сканируем первые 5 страниц в категориях гитар и басов
+    urls = []
     for page in range(0, 100, 20):
-        page_str = f"{page}/" if page > 0 else ""
-        urls_to_check.append(("guitar", f"https://hudba.bazos.sk/gitary/{page_str}"))
-        urls_to_check.append(("bass", f"https://hudba.bazos.sk/basgitaru/{page_str}"))
+        p = f"{page}/" if page > 0 else ""
+        urls.append(f"https://hudba.bazos.sk/gitary/{p}")
+        urls.append(f"https://hudba.bazos.sk/basgitaru/{p}")
 
     async with aiohttp.ClientSession(headers=headers) as session:
-        for section, url in urls_to_check:
+        for url in urls:
             try:
                 async with session.get(url) as response:
                     if response.status != 200:
@@ -101,32 +104,34 @@ async def check_bazos_guitars(force_send=False):
                         short_desc = short_desc_elem.text.strip().lower() if short_desc_elem else ""
                         price_raw = price_elem.text.strip().lower()
 
-                        digits = re.sub(r"[^\d]", "", price_raw)
-                        price = float(digits) if digits else None
+                        # Надёжный парсинг цены
+                        digits = re.findall(r'\d+', price_raw)
+                        price = float("".join(digits)) if digits else None
+
+                        # Флаги совпадений
+                        is_bass = "basgitaru" in ad_url or any(kw in title_lower or kw in short_desc for kw in BASS_KEYWORDS)
+                        has_strat_tele = any(kw in title_lower or kw in short_desc for kw in STRAT_TELE_KEYWORDS)
+                        
+                        # Проверяем обмен
+                        has_exchange = any(kw in short_desc or kw in title_lower or kw in price_raw for kw in EXCHANGE_KEYWORDS)
+                        
+                        # Если гитара дорогая или цена не указана, но похожа на обмен — заглядываем внутрь
+                        if not has_exchange and (price is None or price >= 600):
+                            full_desc = await fetch_full_description(session, ad_url)
+                            has_exchange = any(kw in full_desc for kw in EXCHANGE_KEYWORDS)
 
                         match_reason = None
 
-                        # Быстрая проверка совпадений
-                        has_exchange_short = any(kw in short_desc or kw in title_lower or kw in price_raw for kw in EXCHANGE_KEYWORDS)
-                        has_strat_tele = any(kw in short_desc or kw in title_lower for kw in STRAT_TELE_KEYWORDS)
-
-                        # Если есть подозрение на обмен, но в кратком описании слова нет — заходим внутрь объявления
-                        full_desc = short_desc
-                        if not has_exchange_short and (price is None or price >= 600):
-                            full_desc = await fetch_full_description(session, ad_url)
-
-                        has_exchange = has_exchange_short or any(kw in full_desc for kw in EXCHANGE_KEYWORDS)
-
-                        # 1. Обмен (цена >= 600€ или Vymením/Dohodou)
+                        # Критерий 1: Обмен (цена >= 600€ или Vymením/Dohodou)
                         if has_exchange and (price is None or price >= 600):
                             match_reason = "🔄 Вариант для обмена"
 
-                        # 2. Strat / Telecaster от 600€
+                        # Критерий 2: Strat или Telecaster от 600€
                         elif has_strat_tele and price is not None and price >= 600:
                             match_reason = "🎸 Telecaster / Stratocaster (от 600€)"
 
-                        # 3. Бюджетный бас до 150€
-                        elif section == "bass" and price is not None and 0 < price <= 150:
+                        # Критерий 3: Любой бас до 150€
+                        elif is_bass and price is not None and 0 < price <= 150:
                             match_reason = "🔥 Бюджетный бас (до 150€)"
 
                         if match_reason:
@@ -140,9 +145,9 @@ async def check_bazos_guitars(force_send=False):
                                 f"🔗 [Открыть на Bazoš]({ad_url})"
                             )
                             await bot.send_message(chat_id=MY_CHAT_ID, text=text, parse_mode="Markdown")
-                            await asyncio.sleep(0.3)
+                            await asyncio.sleep(0.2)
             except Exception as e:
-                print(f"Ошибка при парсинге: {e}")
+                print(f"Ошибка парсинга: {e}")
     return found_any
 
 async def start_web_server():
