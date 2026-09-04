@@ -16,9 +16,11 @@ scheduler = AsyncIOScheduler()
 
 seen_ads = set()
 
+# Расширенный список ключевых слов для поиска обмена на Bazoš
 EXCHANGE_KEYWORDS = [
     "výmena", "vymením", "vymena", "vymenim", 
-    "na výmenu", "na vymenu", "možná výmena", "mozna vymena"
+    "na výmenu", "na vymenu", "možná výmena", "mozna vymena",
+    "vymeniť", "vymenit", "vymene", "výmene", "doplatok", "doplatom"
 ]
 
 URLS = [
@@ -26,18 +28,21 @@ URLS = [
     "https://hudba.bazos.sk/basgitaru/"
 ]
 
-# Ответ на команду /start
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
-    await message.answer("🎸 **Радар гитар Bazoš запущен!**\n\nЯ ищу гитары и басы от 600€ до 850€ с возможностью обмена. Как только что-то появится, я сразу пришлю ссылку.\n\nНапиши /test чтобы запустить поиск прямо сейчас.", parse_mode="Markdown")
+    await message.answer(
+        "🎸 **Радар гитар Bazoš запущен!**\n\n"
+        "Я ищу гитары и басы от 600€ с возможностью обмена. Как только что-то появится, я сразу пришлю ссылку.\n\n"
+        "Напиши /test чтобы запустить поиск прямо сейчас.",
+        parse_mode="Markdown"
+    )
 
-# Команда для ручной проверки /test
 @dp.message(Command("test"))
 async def test_handler(message: types.Message):
     await message.answer("🔍 Проверяю Bazoš.sk...")
     found = await check_bazos_guitars(force_send=True)
     if not found:
-        await message.answer("ℹ️ В диапазоне 600€–850€ объявлений с текстом обмена прямо сейчас не найдено. Фоновый мониторинг продолжит искать каждые 15 минут!")
+        await message.answer("ℹ️ Подходящих объявлений с текстом обмена прямо сейчас не найдено. Фоновый мониторинг продолжит искать каждые 15 минут!")
 
 async def check_bazos_guitars(force_send=False):
     headers = {
@@ -79,7 +84,8 @@ async def check_bazos_guitars(force_send=False):
                         except ValueError:
                             continue
 
-                        if 600 <= price <= 850:
+                        # ФИЛЬТР: Нижний порог 600€, верхнего лимита нет
+                        if price >= 600:
                             has_exchange = any(kw in desc or kw in title.lower() for kw in EXCHANGE_KEYWORDS)
                             
                             seen_ads.add(ad_id)
